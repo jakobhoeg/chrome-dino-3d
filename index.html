@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -16,28 +17,29 @@
 	<link rel="preload" as="image" href="media/3d-title.png">
 
 </head>
+
 <body>
 
 	<div id="preloader">
 		<div class="progress">
-	        <div class="chart">
-	            <div id="game-load-progress" class="bar lime bar-0">
-	                <div class="face top">
-	                    <div class="growing-bar"></div>
-	                </div>
-	                <div class="face side-0">
-	                    <div class="growing-bar"></div>
-	                </div>
-	                <div class="face floor">
-	                    <div class="growing-bar"></div>
-	                </div>
-	                <div class="face side-a"></div>
-	                <div class="face side-b"></div>
-	                <div class="face side-1">
-	                    <div class="growing-bar"></div>
-	                </div>
-	            </div>
-	        </div>
+			<div class="chart">
+				<div id="game-load-progress" class="bar lime bar-0">
+					<div class="face top">
+						<div class="growing-bar"></div>
+					</div>
+					<div class="face side-0">
+						<div class="growing-bar"></div>
+					</div>
+					<div class="face floor">
+						<div class="growing-bar"></div>
+					</div>
+					<div class="face side-a"></div>
+					<div class="face side-b"></div>
+					<div class="face side-1">
+						<div class="growing-bar"></div>
+					</div>
+				</div>
+			</div>
 		</div>
 	</div>
 
@@ -59,6 +61,7 @@
 	<div id="game-restart" class="hidden">
 		<h1>GAME OVER</h1>
 		<img src="media/repeat.png">
+		<button id="ai-feedback-btn" class="ai-feedback-btn">Get AI Feedback</button>
 	</div>
 
 	<div id="ai-feedback">
@@ -83,12 +86,15 @@
 	<script src="libs/three/shaders/DepthLimitedBlurShader.js"></script>
 	<script src="libs/three/shaders/UnpackDepthRGBAShader.js"></script>
 
+	<script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
 	<script src="libs/nebula/three-nebula.js"></script>
 	<script src="libs/howler/howler.min.js"></script>
 
 	<script src="libs/visibly/visibly.js"></script>
 	<script src="js/config-high.js?patch=3x1"></script>
-	<script src="js/build.js"></script>
+	<script type="module" src="js/build.js"></script>
+	<script type="module" src="js/worker.js"></script>
 
 </body>
+
 </html>

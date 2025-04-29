@@ -27,6 +27,7 @@ const renderer = new THREE.WebGLRenderer({
 	antialias: config.renderer.antialias,
 	alpha: false,
 	powerPreference: 'high-performance',
+	preserveDrawingBuffer: true,
 	depth: true});
 
 scene.background = new THREE.Color( 0xE7B251 );

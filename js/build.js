@@ -613,6 +613,7 @@ const renderer = new THREE.WebGLRenderer({
   antialias: config.renderer.antialias,
   alpha: false,
   powerPreference: "high-performance",
+  preserveDrawingBuffer: true,
   depth: true
 });
 scene.background = new THREE.Color(15184465);
@@ -2112,18 +2113,11 @@ class GameManager {
     }
   }
   async generateGameSummary() {
-    if (!self.ai || !self.ai.languageModel) {
-      console.warn('Chrome Prompt API not available');
-      return;
-    }
-
     const gameData = {
       score: Math.floor(score.score),
       highScore: Math.floor(score.highest_score),
       timePlayed: Math.floor(clock.getElapsedTime()),
     };
-
-    const systemPrompt = 'You are DinoCoach, a concise feedback assistant for the Chrome Dino Runner game. A game where the user has to jump or duck obstacles. There is no other functionality. The speed increases as the game goes on. The stats you receive are always from a SINGLE completed game run. "High Score" represents the player\'s best score across ALL previous games, NOT just the current run. Never make value judgments about whether the high score itself is good or bad - you have no benchmark for comparison. Focus on practical tips for jumping over cacti and ducking under pterodactyls based solely on score and survival time, but also be hopeful and fun in your answers. Keep responses under 75 words total.'
 
     const prompt = `Chrome Dino Game - Latest Run Results:
     Current Run Score: ${gameData.score}
@@ -2132,9 +2126,10 @@ class GameManager {
 
     Based ONLY on these metrics, provide:
     1. A brief assessment comparing current score to personal high score. 
-    2. Two general tips to improve jumping/ducking timing for better survival.`
+    2. Two general tips to improve jumping/ducking timing for better survival.`;
 
-    console.log(prompt)
+    console.log(prompt);
+
     try {
       // Show loading state
       const aiFeedbackDiv = document.getElementById('ai-feedback');
@@ -2143,27 +2138,7 @@ class GameManager {
       aiFeedbackDiv.style.display = 'block';
       aiFeedbackText.innerHTML = 'Analyzing your performance...';
 
-      if (!this.session) {
-        const capabilities = await self.ai.languageModel.capabilities();
-        this.session = await self.ai.languageModel.create({
-          temperature: 0.8,
-          topK: capabilities.defaultTopK,
-          systemPrompt: systemPrompt
-        });
-      }
-
-      const stream = await this.session.promptStreaming(prompt);
-
-      let result = '';
-      for await (const chunk of stream) {
-        result += chunk;
-      }
-
-      const summary = result;
-      console.log(summary)
-
-      // Update the UI
-      aiFeedbackText.innerHTML = summary;
+      aiWorker.sendMessage(prompt);
 
     } catch (error) {
       console.error('Error generating game summary:', error);
@@ -2245,6 +2220,26 @@ class GameManager {
     clock.getDelta();
     this.render();
     this.loop();
+
+    // Make sure the AI worker is initialized
+    if (!aiWorker.isInitialized) {
+      console.log('Initializing AI worker before starting screenshot capture');
+      aiWorker.init();
+
+      // Wait a moment for the worker to initialize
+      setTimeout(() => {
+        if (aiWorker.isInitialized) {
+          // Start capturing screenshots when the game starts
+          aiWorker.startScreenshotCapture();
+        } else {
+          console.warn('AI worker failed to initialize, screenshot capture not started');
+        }
+      }, 2000);
+    } else {
+      // Start capturing screenshots when the game starts
+      aiWorker.startScreenshotCapture();
+    }
+
     if (visibly.hidden()) {
       this.pause();
     }
@@ -2263,6 +2258,9 @@ class GameManager {
     audio.play("killed");
     this.setStarter(0);
 
+    // Stop capturing screenshots when the game stops
+    aiWorker.stopScreenshotCapture();
+
     this.generateGameSummary();
   }
   pause() {
@@ -2272,6 +2270,9 @@ class GameManager {
     this.isPaused = true;
     this.isPlaying = false;
     audio.pause("bg");
+
+    // Stop capturing screenshots when the game is paused
+    aiWorker.stopScreenshotCapture();
   }
   resume() {
     if (!this.isPaused) {
@@ -2283,6 +2284,9 @@ class GameManager {
     clock.getDelta();
     this.render();
     this.loop();
+
+    // Resume capturing screenshots when the game is resumed
+    aiWorker.startScreenshotCapture();
   }
   reset() {
     enemy.increase_velocity(13, true);
@@ -2379,3 +2383,381 @@ class InterfaceManager {
 }
 let game = new GameManager(new InterfaceManager());
 game.init();
+
+// AI Worker Management
+class AIWorkerManager {
+  constructor() {
+    this.worker = null;
+    this.status = null;
+    this.error = null;
+    this.loadingMessage = "";
+    this.progressItems = [];
+    this.isRunning = false;
+    this.messages = [];
+    this.tps = null;
+    this.numTokens = null;
+    this.onMessageCallback = null;
+    this.isInitialized = false;
+    this.screenshotInterval = null;
+    this.lastScreenshotTime = 0;
+    this.screenshotDelay = 5000; // 5 second delay between screenshots
+    this.isProcessingScreenshot = false;
+    this.lastUIUpdate = 0;
+    this.uiUpdateThrottle = 300;
+    this.pendingUIUpdate = false;
+  }
+
+  async init() {
+    // Create the worker if it does not yet exist
+    if (!this.worker) {
+      try {
+        this.worker = new Worker(new URL('./worker.js', import.meta.url), {
+          type: 'module'
+        });
+
+        // Create a callback function for messages from the worker thread
+        const onMessageReceived = (e) => {
+          switch (e.data.status) {
+            case 'loading':
+              // Model file start load: add a new progress item to the list
+              this.status = 'loading';
+              this.loadingMessage = e.data.data;
+              this.scheduleUIUpdate();
+              break;
+
+            case 'initiate':
+              this.progressItems.push(e.data);
+              this.scheduleUIUpdate();
+              break;
+
+            case 'progress':
+              // Model file progress: update one of the progress items
+              this.progressItems = this.progressItems.map(item => {
+                if (item.file === e.data.file) {
+                  return { ...item, ...e.data };
+                }
+                return item;
+              });
+              this.scheduleUIUpdate();
+              break;
+
+            case 'done':
+              // Model file loaded: remove the progress item from the list
+              this.progressItems = this.progressItems.filter(
+                item => item.file !== e.data.file
+              );
+              this.scheduleUIUpdate();
+              break;
+
+            case 'ready':
+              // Pipeline ready: the worker is ready to accept messages
+              this.status = 'ready';
+              this.isInitialized = true;
+              this.scheduleUIUpdate();
+              console.log('AI Worker is now ready to use');
+              break;
+
+            case 'start':
+              // Start generation
+              this.messages.push({
+                role: 'assistant',
+                content: [{ type: 'text', text: '' }]
+              });
+              this.scheduleUIUpdate();
+              break;
+
+            case 'update':
+              // Generation update: update the output text
+              const { output, tps, numTokens } = e.data;
+              this.tps = tps;
+              this.numTokens = numTokens;
+
+              if (this.messages.length > 0) {
+                const lastMessage = this.messages[this.messages.length - 1];
+                if (lastMessage.role === 'assistant' && lastMessage.content.length > 0) {
+                  lastMessage.content[0].text += output;
+                  this.scheduleUIUpdate();
+                }
+              }
+              break;
+
+            case 'complete':
+              // Generation complete
+              this.isRunning = false;
+              this.scheduleUIUpdate();
+              break;
+
+            case 'error':
+              this.error = e.data.data;
+              this.scheduleUIUpdate();
+              break;
+          }
+        };
+
+        const onErrorReceived = (e) => {
+          console.error('Worker error:', e);
+          this.error = e.message || 'Unknown worker error';
+          this.scheduleUIUpdate();
+        };
+
+        // Attach the callback function as an event listener
+        this.worker.addEventListener('message', onMessageReceived);
+        this.worker.addEventListener('error', onErrorReceived);
+
+        // Start loading the model
+        this.worker.postMessage({ type: 'load' });
+        console.log('AI Worker initialization started');
+      } catch (error) {
+        console.error('Failed to initialize worker:', error);
+        this.error = error.message || 'Failed to initialize worker';
+        this.scheduleUIUpdate();
+      }
+    }
+  }
+
+  // Schedule UI updates with throttling to prevent UI thread congestion
+  scheduleUIUpdate() {
+    if (this.pendingUIUpdate) return;
+
+    this.pendingUIUpdate = true;
+
+    // Use requestAnimationFrame to schedule the update at the next frame
+    requestAnimationFrame(() => {
+      const now = performance.now();
+      if (now - this.lastUIUpdate >= this.uiUpdateThrottle) {
+        this.updateUI();
+        this.lastUIUpdate = now;
+      }
+      this.pendingUIUpdate = false;
+    });
+  }
+
+  updateUI() {
+    // Update the AI feedback UI
+    const aiFeedbackDiv = document.getElementById('ai-feedback');
+    const aiFeedbackText = document.getElementById('ai-feedback-text');
+
+    if (aiFeedbackDiv && aiFeedbackText) {
+      // Make sure the div is visible
+      aiFeedbackDiv.style.display = 'block';
+
+      if (this.status === 'loading') {
+        aiFeedbackText.innerHTML = `Loading model: ${this.loadingMessage}`;
+      } else if (this.status === 'ready' && this.messages.length > 0) {
+        const lastMessage = this.messages[this.messages.length - 1];
+        if (lastMessage.role === 'assistant' && lastMessage.content.length > 0) {
+          aiFeedbackText.innerHTML = lastMessage.content[0].text;
+        }
+      } else if (this.error) {
+        aiFeedbackText.innerHTML = `Error: ${this.error}`;
+      } else if (this.status === 'ready') {
+        // If ready but no messages yet, show a default message
+        aiFeedbackText.innerHTML = 'AI model is ready. Click the "Get AI Feedback" button to analyze your performance.';
+      }
+    }
+  }
+
+  async sendMessage(text, images = []) {
+    if (!this.worker || !this.isInitialized) {
+      console.warn('Worker not ready yet. Initializing...');
+      await this.init();
+
+      // Show loading state
+      const aiFeedbackDiv = document.getElementById('ai-feedback');
+      const aiFeedbackText = document.getElementById('ai-feedback-text');
+
+      if (aiFeedbackDiv && aiFeedbackText) {
+        aiFeedbackDiv.style.display = 'block';
+        aiFeedbackText.innerHTML = 'Initializing AI model, please wait...';
+      }
+
+      // Wait for initialization to complete
+      let attempts = 0;
+      const maxAttempts = 10;
+
+      while (!this.isInitialized && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        attempts++;
+      }
+
+      if (this.isInitialized) {
+        await this._sendMessageInternal(text, images);
+      } else {
+        console.warn('Worker still not ready after waiting');
+        if (aiFeedbackText) {
+          aiFeedbackText.innerHTML = 'AI model is still initializing. Please try again in a moment.';
+        }
+      }
+
+      return;
+    }
+
+    await this._sendMessageInternal(text, images);
+  }
+
+  async _sendMessageInternal(text, images = []) {
+    const content = [
+      ...images.map(image => ({ type: 'image', image })),
+      { type: 'text', text }
+    ];
+
+    this.messages.push({ role: 'user', content });
+    this.isRunning = true;
+    this.tps = null;
+
+    // Use Promise.resolve().then() to defer sending the message to the worker
+    // This gives the main thread a chance to process other tasks
+    await Promise.resolve().then(() => {
+      this.worker.postMessage({ type: 'generate', data: this.messages });
+      this.scheduleUIUpdate();
+    });
+  }
+
+  interrupt() {
+    if (this.worker && this.isRunning) {
+      this.worker.postMessage({ type: 'interrupt' });
+    }
+  }
+
+  reset() {
+    if (this.worker) {
+      this.worker.postMessage({ type: 'reset' });
+      this.messages = [];
+      this.isRunning = false;
+      this.tps = null;
+      this.numTokens = null;
+      this.scheduleUIUpdate();
+    }
+  }
+
+  // Capture a screenshot of the game screen
+  async captureScreenshot() {
+    try {
+      // Use html2canvas to capture the entire viewport
+      const canvas = await html2canvas(document.body, {
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: null,
+        scale: 1,
+        logging: false,
+        onclone: (clonedDoc) => {
+          // Ensure the WebGL canvas is visible in the clone
+          const threeCanvas = clonedDoc.getElementById('three-canvas');
+          if (threeCanvas) {
+            threeCanvas.style.visibility = 'visible';
+          }
+        }
+      });
+
+      // Convert to data URL with high quality
+      const dataURL = canvas.toDataURL('image/png', 1.0);
+
+      console.log('Screenshot captured');
+      return dataURL;
+    } catch (error) {
+      console.error('Error capturing screenshot:', error);
+      return null;
+    }
+  }
+
+  // Start capturing screenshots at regular intervals
+  startScreenshotCapture() {
+    if (this.screenshotInterval) {
+      clearInterval(this.screenshotInterval);
+    }
+
+    console.log('Starting screenshot capture');
+    this.lastScreenshotTime = Date.now();
+
+    // Use a longer interval to reduce processing load
+    this.screenshotInterval = setInterval(async () => {
+      const currentTime = Date.now();
+      if (currentTime - this.lastScreenshotTime >= this.screenshotDelay) {
+        this.lastScreenshotTime = currentTime;
+
+        // Only capture and send screenshots if the game is playing
+        if (game.isPlaying && !this.isProcessingScreenshot) {
+          // Use Promise.resolve().then() to defer screenshot capture
+          await Promise.resolve().then(async () => {
+            const screenshot = this.captureScreenshot();
+            if (screenshot) {
+              // Send the screenshot to the AI model
+              await this.sendScreenshot(screenshot);
+            }
+          });
+        }
+      }
+    }, 1000); // Check every second instead of every 100ms
+  }
+
+  // Stop capturing screenshots
+  stopScreenshotCapture() {
+    if (this.screenshotInterval) {
+      clearInterval(this.screenshotInterval);
+      this.screenshotInterval = null;
+      console.log('Screenshot capture stopped');
+    }
+  }
+
+  // Send a screenshot to the AI model
+  async sendScreenshot(screenshot) {
+    if (!this.isInitialized) {
+      console.warn("AI worker not initialized");
+      return;
+    }
+
+    if (this.isProcessingScreenshot) {
+      console.log("Already processing a screenshot, skipping");
+      return;
+    }
+
+    this.isProcessingScreenshot = true;
+
+    try {
+      console.log('Processing screenshot');
+
+      // Wait for the screenshot to be captured
+      const screenshotData = await screenshot;
+
+      // Create a message with the screenshot
+      const message = {
+        role: 'user',
+        content: [
+          { type: 'image', image: screenshotData },
+          { type: 'text', text: 'Chrome Dino Game - Live Gameplay Analysis:\n\nBased on this current game screenshot, provide:\n1. The current HI score shown in the top right\n2. A brief assessment of the current game state\n3. Two tips for the player based on what you see in the current game situation.' }
+        ]
+      };
+
+      this.worker.postMessage({ type: 'generate', data: [message] });
+
+    } catch (error) {
+      console.error('Error processing screenshot:', error);
+    } finally {
+      this.isProcessingScreenshot = false;
+    }
+  }
+}
+
+// Initialize the AI worker
+const aiWorker = new AIWorkerManager();
+aiWorker.init();
+
+// Add event listener for the AI feedback button
+document.addEventListener('DOMContentLoaded', function () {
+  const aiFeedbackBtn = document.getElementById('ai-feedback-btn');
+  if (aiFeedbackBtn) {
+    aiFeedbackBtn.addEventListener('click', function () {
+      // Show loading state
+      const aiFeedbackDiv = document.getElementById('ai-feedback');
+      const aiFeedbackText = document.getElementById('ai-feedback-text');
+
+      if (aiFeedbackDiv && aiFeedbackText) {
+        aiFeedbackDiv.style.display = 'block';
+        aiFeedbackText.innerHTML = 'Analyzing your performance...';
+
+        // Generate game summary
+        game.generateGameSummary();
+      }
+    });
+  }
+});

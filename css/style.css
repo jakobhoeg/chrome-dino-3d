@@ -733,3 +733,45 @@ END // CHART'S RULES
   text-align: left;
   text-wrap: wrap;
 }
+
+.ai-feedback-btn {
+  background-color: #4285f4;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 10px 20px;
+  font-size: 16px;
+  cursor: pointer;
+  margin-top: 20px;
+  transition: background-color 0.3s;
+}
+
+.ai-feedback-btn:hover {
+  background-color: #3367d6;
+}
+
+#ai-feedback {
+  display: none;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background-color: rgba(255, 255, 255, 0.95);
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  max-width: 500px;
+  width: 90%;
+  z-index: 1000;
+}
+
+#ai-feedback h1 {
+  margin-top: 0;
+  color: #4285f4;
+  font-size: 24px;
+}
+
+#ai-feedback-text {
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
